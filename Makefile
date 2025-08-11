@@ -16,9 +16,9 @@ DEPS=$(OBJS:%.o=%.d)
 CXXFLAGS=-std=c++17 -fPIC -DGHOST_GUI
 CXXFLAGS_CLI=-std=c++17 -fPIC
 LDFLAGS=-lpthread
-LDFLAGS_CLI=-lpthread
+LDFLAGS_CLI=-lpthread -lsfml-network -lsfml-system
 
-include config.mk
+-include config.mk
 
 all: ghost_server ghost_server_cli
 clean:

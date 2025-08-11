@@ -294,6 +294,8 @@ int main(int argc, char **argv) {
 
     puts("Server starting up");
     network.StartServer(port);
+    network.ConnectToWebServer("127.0.0.1", 8080);
+    network.SetWebHeightUpdates(true);
     while (!g_should_stop) {
     #ifdef _WIN32
         if (_kbhit()) {

@@ -97,6 +97,13 @@ private:
 
     void DoHeartbeats();
 
+    // Web Socket connection
+    sf::TcpSocket webSocket;
+    sf::IpAddress webServerIP;
+    unsigned short webServerPort;
+    bool webServerConnected;
+    bool enableWebHeightUpdates;
+
 public:
     NetworkManager(const char *logfile = "ghost_log");
     ~NetworkManager();
@@ -127,9 +134,16 @@ public:
     void BanClientIP(Client &cl);
     void ServerMessage(const char *msg);
 
-    // DEEP DIP
+    // Deep Dip
     void SendHeightUpdates();
-    std::vector<std::pair<std::string, float>> GetPlayerMaxHeights();
+
+    // Deep Dip Web Server
+    bool ConnectToWebServer(const std::string& ip, unsigned short port);
+    void DisconnectFromWebServer();
+    void SendHeightJsonDataToWebServer(const std::vector<Client*>& playersWithChanges);
+    void SendPlayerDisconnectToWebServer(Client& client, const char* reason);
+    void SetWebHeightUpdates(bool enabled);
+
 
 #ifdef GHOST_GUI
 signals:
