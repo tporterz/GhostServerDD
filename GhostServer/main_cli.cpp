@@ -1,10 +1,17 @@
 #include "networkmanager.h"
 #include <signal.h>
-#include <poll.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 #include <string>
+#include <iostream>
+#ifdef _WIN32
+#include <windows.h>
+#include <conio.h> // for _kbhit(), _getch()
+#else
+#include <poll.h>
+#include <unistd.h>
+#endif
+
 
 static volatile int g_should_stop = 0;
 
@@ -288,22 +295,27 @@ int main(int argc, char **argv) {
     puts("Server starting up");
     network.StartServer(port);
     while (!g_should_stop) {
-        struct pollfd fds[] = {
-            (struct pollfd){
-                .fd = STDIN_FILENO,
-                .events = POLLIN,
-                .revents = 0,
-            },
-        };
-
-        if (poll(fds, sizeof fds / sizeof fds[0], 50) == 1) {
-            if (fds[0].revents & POLLIN) {
-                char *line = NULL;
-                size_t len = 0;
-                if (getline(&line, &len, stdin) != -1) handle_cmd(line);
-                if (line) free(line);
+    #ifdef _WIN32
+        if (_kbhit()) {
+            std::string input;
+            std::getline(std::cin, input);
+            if (!input.empty()) {
+                // getline returns std::string, but handle_cmd wants char*
+                handle_cmd(input.data());
             }
         }
+        Sleep(50); // milliseconds
+    #else
+        struct pollfd fds[] = {
+            { STDIN_FILENO, POLLIN, 0 },
+        };
+        if (poll(fds, 1, 50) == 1 && (fds[0].revents & POLLIN)) {
+            char *line = NULL;
+            size_t len = 0;
+            if (getline(&line, &len, stdin) != -1) handle_cmd(line);
+            free(line);
+        }
+    #endif
     }
     puts("Server shutting down");
     network.StopServer();

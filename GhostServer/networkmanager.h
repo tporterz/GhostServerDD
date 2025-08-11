@@ -34,6 +34,9 @@ enum class HEADER {
     SPEEDRUN_FINISH,
     MODEL_CHANGE,
     COLOR_CHANGE,
+
+    // P2 DEEP DIP ADDITIONS
+    HEIGHT_UPDATE,
 };
 
 struct DataGhost {
@@ -62,6 +65,10 @@ struct Client {
     bool returnedHeartbeat;
     bool missedLastHeartbeat;
     bool spectator;
+
+    // P2 DEEP DIP ADDITIONS
+    float maxHeight;
+    Client() : maxHeight(0.0f) {}
 };
 
 #ifdef GHOST_GUI
@@ -119,6 +126,10 @@ public:
 
     void BanClientIP(Client &cl);
     void ServerMessage(const char *msg);
+
+    // DEEP DIP
+    void SendHeightUpdates();
+    std::vector<std::pair<std::string, float>> GetPlayerMaxHeights();
 
 #ifdef GHOST_GUI
 signals:

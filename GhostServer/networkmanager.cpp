@@ -6,6 +6,10 @@
 #include <cstdlib>
 #include <queue>
 
+// Deep dip includes
+#include <sstream>
+#include <iomanip>
+
 #include <SFML/Network.hpp>
 
 static FILE *g_logFile;
@@ -35,6 +39,27 @@ static void file_log(std::string str) {
 static std::chrono::time_point<std::chrono::steady_clock> lastHeartbeat;
 static std::chrono::time_point<std::chrono::steady_clock> lastHeartbeatUdp;
 static std::chrono::time_point<std::chrono::steady_clock> lastUpdate;
+
+// DEEP DIP VARS
+static std::chrono::time_point<std::chrono::steady_clock> lastHeightUpdate;
+#define HEIGHT_UPDATE_RATE 30000 // update every 30 seconds
+#define TOWER_BOTTOM_Z -13103.97f
+#define TOWER_TOP_Z 9632.03f
+#define TOWER_TOTAL_HEIGHT (TOWER_TOP_Z - TOWER_BOTTOM_Z) // 24757.75 units
+#define TOWER_MAP_NAME "Sleepless" // replace with real bsp name later
+
+// Helper function to convert world Z to tower height
+static float WorldZToTowerHeight(float worldZ) {
+    worldZ += 64; // For some reason z-pos is 64 units below what is expected, so adding it arbitrarily to compensate for now
+
+    if (worldZ < TOWER_BOTTOM_Z) return 0.0f; 
+    if (worldZ > TOWER_TOP_Z) return TOWER_TOTAL_HEIGHT;
+    return worldZ - TOWER_BOTTOM_Z;
+}
+
+static bool IsTowerMap(const std::string& mapName) {
+    return mapName == TOWER_MAP_NAME;
+}
 
 //DataGhost
 
@@ -429,11 +454,60 @@ void NetworkManager::Treat(sf::Packet& packet, unsigned short udp_port)
         DataGhost data;
         packet >> data;
         auto client = this->GetClientByID(ID);
-        if (client) client->data = data;
+        if (client) {
+            client->data = data;
+
+            if (IsTowerMap(client->currentMap)) {
+                float towerHeight = WorldZToTowerHeight(data.position.z);
+                if (towerHeight > client->maxHeight) {
+                    client->maxHeight = towerHeight;
+                }
+            }
+        }
         break;
+    }
+
+    case HEADER::HEIGHT_UPDATE: {
+        break;
+        // For receiving height updates from clients if needed
+        // Will just track server-side for now
     }
     default:
         break;
+    }
+}
+
+// DEEP DIP METHOD TO TRACK HEIGHT
+void NetworkManager::SendHeightUpdates() {
+    // Find players with changes
+    std::vector<Client*> playersOnTower;
+    for (auto& client : this->clients) {
+        if (IsTowerMap(client.currentMap)) {
+            playersOnTower.push_back(&client);
+        }
+    }
+    if (playersOnTower.empty()) return;
+    
+    sf::Packet packet;
+    packet << HEADER::HEIGHT_UPDATE << sf::Uint32(0) << sf::Uint32(playersOnTower.size());
+    for (auto* client : playersOnTower) {
+        float currentHeight = WorldZToTowerHeight(client->data.position.z); 
+        packet << client->ID << client->maxHeight << currentHeight;
+        
+        // Log the update
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(2);
+        float maxPercentage = (client->maxHeight / TOWER_TOTAL_HEIGHT) * 100.0f;
+        float currentPercentage = (currentHeight / TOWER_TOTAL_HEIGHT) * 100.0f;
+        oss << "HEIGHT_UPDATE " << client->name << " (ID:" << client->ID 
+            << ") max: " << client->maxHeight << " units (" << maxPercentage << "%) "
+            << "current: " << currentHeight << " units (" << currentPercentage << "%)";
+        GHOST_LOG(oss.str());
+    }
+    
+    // Send to all clients
+    for (auto& client : this->clients) {
+        client.tcpSocket->send(packet);
     }
 }
 
@@ -457,6 +531,9 @@ void NetworkManager::RunServer()
     this->isRunning = true;
     this->clock.restart();
 
+    // Initialize the height update timer
+    lastHeightUpdate = std::chrono::steady_clock::now();
+
     while (this->isRunning) {
         auto now = std::chrono::steady_clock::now();
         if (now > lastHeartbeat + std::chrono::milliseconds(HEARTBEAT_RATE)) {
@@ -473,6 +550,12 @@ void NetworkManager::RunServer()
                 }
             }
             lastHeartbeatUdp = now;
+        }
+
+        // Deep Dip Height Updates
+        if (now > lastHeightUpdate + std::chrono::milliseconds(HEIGHT_UPDATE_RATE)) {
+            this->SendHeightUpdates();
+            lastHeightUpdate = now;
         }
 
         if (now > lastUpdate + std::chrono::milliseconds(50)) {
@@ -552,4 +635,13 @@ void NetworkManager::DoHeartbeats()
             }
         }
     }
+}
+
+// Method to get current max heights
+std::vector<std::pair<std::string, float>> NetworkManager::GetPlayerMaxHeights() {
+    std::vector<std::pair<std::string, float>> heights;
+    for (const auto& client : this->clients) {
+        heights.push_back({client.name, client.maxHeight});
+    }
+    return heights;
 }
