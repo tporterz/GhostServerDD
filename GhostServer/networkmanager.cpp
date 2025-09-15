@@ -63,7 +63,7 @@ static bool IsTowerMap(const std::string& mapName) {
 
 // Helper function to check if position is at origin (spawn position)
 static bool IsAtOrigin(const Vector& position) {
-    const float ORIGIN_THRESHOLD = 0.01f;
+    const float ORIGIN_THRESHOLD = 512.0f;
     return (position.x >= -ORIGIN_THRESHOLD && position.x <= ORIGIN_THRESHOLD &&
             position.y >= -ORIGIN_THRESHOLD && position.y <= ORIGIN_THRESHOLD &&
             position.z >= -ORIGIN_THRESHOLD && position.z <= ORIGIN_THRESHOLD);
