@@ -68,7 +68,9 @@ struct Client {
 
     // P2 DEEP DIP ADDITIONS
     float maxHeight;
-    Client() : maxHeight(0.0f) {}
+    float lastHeight;
+    float lastHeightUpdate;
+    Client() : maxHeight(0.0f), lastHeight(0.0f), lastHeightUpdate(0.0f) {}
 };
 
 #ifdef GHOST_GUI

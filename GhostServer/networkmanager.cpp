@@ -217,10 +217,6 @@ void NetworkManager::DisconnectPlayer(Client& c, const char *reason)
     }
 
     if (toErase != -1) {
-        // Only send disconnect notification for non-spectator players on tower map
-        if (!this->clients[toErase].spectator && IsTowerMap(this->clients[toErase].currentMap)) {
-            this->SendPlayerDisconnectToWebServer(this->clients[toErase], reason);
-        }
         this->clients.erase(this->clients.begin() + toErase);
     }
 }
@@ -378,7 +374,8 @@ void NetworkManager::Treat(sf::Packet& packet, unsigned short udp_port)
         if (client) {
             this->DisconnectPlayer(*client, "requested");
 
-            if (IsTowerMap(client->currentMap)) {
+            if (!client->spectator && IsTowerMap(client->currentMap)) {
+                std::string mapName = client->currentMap;
                 this->SendPlayerDisconnectToWebServer(*client, "requested");
             }
         }
@@ -476,9 +473,11 @@ void NetworkManager::Treat(sf::Packet& packet, unsigned short udp_port)
             // Only track height for non-spectators on tower map, and not when they're at the origin
             if (!client->spectator && IsTowerMap(client->currentMap) && !IsAtOrigin(data.position)) {
                 float towerHeight = WorldZToTowerHeight(data.position.z);
-                if (towerHeight > client->maxHeight) {
+                float heightDelta = towerHeight - client->lastHeight;
+                if (towerHeight > client->maxHeight && heightDelta <= 300.0f && heightDelta != 0.0f) {
                     client->maxHeight = towerHeight;
                 }
+                client->lastHeight = towerHeight;
             }
         }
         break;
@@ -504,22 +503,25 @@ void NetworkManager::SendHeightUpdates() {
         }
     }
     if (playersOnTower.empty()) return;
-    
+
+    this->SendHeightJsonDataToWebServer(playersOnTower);
+
     // Log height updates for testing
     for (auto* client : playersOnTower) {
         float currentHeight = IsAtOrigin(client->data.position) ? 0.0f : WorldZToTowerHeight(client->data.position.z); 
-
-        std::ostringstream oss;
-        oss << std::fixed << std::setprecision(2);
-        float maxPercentage = (client->maxHeight / TOWER_TOTAL_HEIGHT) * 100.0f;
-        float currentPercentage = (currentHeight / TOWER_TOTAL_HEIGHT) * 100.0f;
-        oss << "HEIGHT_UPDATE " << client->name << " (ID:" << client->ID 
-            << ") max: " << client->maxHeight << " units (" << maxPercentage << "%) "
-            << "current: " << currentHeight << " units (" << currentPercentage << "%)";
-        GHOST_LOG(oss.str());
+        float heightDelta = currentHeight - client->lastHeightUpdate;
+        if (heightDelta <= 2000 && heightDelta != 0) {
+            std::ostringstream oss;
+            oss << std::fixed << std::setprecision(2);
+            float maxPercentage = (client->maxHeight / TOWER_TOTAL_HEIGHT) * 100.0f;
+            float currentPercentage = (currentHeight / TOWER_TOTAL_HEIGHT) * 100.0f;
+            oss << "HEIGHT_UPDATE " << client->name << " (ID:" << client->ID 
+                << ") max: " << client->maxHeight << " units (" << maxPercentage << "%) "
+                << "current: " << currentHeight << " units (" << currentPercentage << "%)";
+            GHOST_LOG(oss.str());
+        }
+        client->lastHeightUpdate = currentHeight;
     }
-
-    this->SendHeightJsonDataToWebServer(playersOnTower);
 }
 
 void NetworkManager::BanClientIP(Client &cl) {
@@ -565,7 +567,7 @@ void NetworkManager::RunServer()
             lastHeartbeatUdp = now;
         }
 
-        // Deep Dip Height Updates, every 30 seconds
+        // Deep Dip Height Updates, every 5 seconds
         if (now > lastHeightUpdate + std::chrono::milliseconds(HEIGHT_UPDATE_RATE)) {
             this->SendHeightUpdates();
             lastHeightUpdate = now;
@@ -691,9 +693,10 @@ void NetworkManager::SendHeightJsonDataToWebServer(const std::vector<Client*>& p
         
         for (size_t i = 0; i < playersWithChanges.size(); ++i) {
             const auto* client = playersWithChanges[i];
-            float currentHeight = IsAtOrigin(client->data.position) ? 0.0f : WorldZToTowerHeight(client->data.position.z);
-            
-            json << "{\"id\":" << client->ID 
+            float currentHeight = IsAtOrigin(client->data.position) ? 0.0f : WorldZToTowerHeight(client->data.position.z); 
+            float heightDelta = currentHeight - client->lastHeightUpdate;
+            if (heightDelta <= 2000 && heightDelta != 0) {
+                json << "{\"id\":" << client->ID 
                  << ",\"name\":\"" << client->name << "\""
                  << ",\"max_height\":" << client->maxHeight
                  << ",\"current_height\":" << currentHeight
@@ -701,7 +704,8 @@ void NetworkManager::SendHeightJsonDataToWebServer(const std::vector<Client*>& p
                  << ",\"current_percentage\":" << (currentHeight / TOWER_TOTAL_HEIGHT * 100.0f)
                  << ",\"map\":\"" << client->currentMap << "\"}";
             
-            if (i < playersWithChanges.size() - 1) json << ",";
+                if (i < playersWithChanges.size() - 1) json << ",";
+            }
         }
         json << "]}";
         
@@ -729,9 +733,8 @@ void NetworkManager::SendPlayerDisconnectToWebServer(Client& client, const char*
     if (!this->webServerConnected || !this->enableWebHeightUpdates) {
         return;
     }
-    
+
     try {
-        // Create disconnect notification JSON
         std::ostringstream json;
         json << "{\"type\":\"player_disconnect\""
              << ",\"timestamp\":" << time(NULL)
@@ -741,39 +744,30 @@ void NetworkManager::SendPlayerDisconnectToWebServer(Client& client, const char*
              << ",\"name\":\"" << client.name << "\""
              << ",\"reason\":\"" << reason << "\""
              << ",\"final_max_height\":" << client.maxHeight;
-             
-        // Add current height if on tower map
-        if (IsTowerMap(client.currentMap)) {
-            float currentHeight = IsAtOrigin(client.data.position) ? 0.0f : WorldZToTowerHeight(client.data.position.z);
-            float maxPercentage = (client.maxHeight / TOWER_TOTAL_HEIGHT) * 100.0f;
-            float currentPercentage = (currentHeight / TOWER_TOTAL_HEIGHT) * 100.0f;
-            
-            json << ",\"current_height\":" << currentHeight
-                 << ",\"max_percentage\":" << maxPercentage
-                 << ",\"current_percentage\":" << currentPercentage;
-        } else {
-            json << ",\"current_height\":0"
-                 << ",\"max_percentage\":0"
-                 << ",\"current_percentage\":0";
-        }
 
-        json << ",\"map\":\"" << client.currentMap << "\""
-             << "}}";
-             
-        // Send JSON as string with length prefix
+
+        float currentHeight = IsAtOrigin(client.data.position) ? 0.0f : WorldZToTowerHeight(client.data.position.z);
+        float maxPercentage = (client.maxHeight / TOWER_TOTAL_HEIGHT) * 100.0f;
+        float currentPercentage = (currentHeight / TOWER_TOTAL_HEIGHT) * 100.0f;
+        json << ",\"current_height\":" << currentHeight
+             << ",\"max_percentage\":" << maxPercentage
+             << ",\"current_percentage\":" << currentPercentage;
+
+        json << "}}";
+
         std::string jsonStr = json.str();
         sf::Uint32 dataSize = static_cast<sf::Uint32>(jsonStr.length());
-        
-        // Send size first, then data
+        GHOST_LOG("Sending JSON size: " + std::to_string(dataSize));
+
         if (this->webSocket.send(&dataSize, sizeof(dataSize)) != sf::Socket::Done ||
             this->webSocket.send(jsonStr.c_str(), dataSize) != sf::Socket::Done) {
             GHOST_LOG("Failed to send disconnect notification to external server");
             this->webServerConnected = false;
             return;
         }
-        
+
         GHOST_LOG("Sent disconnect notification for " + client.name + " to web server");
-        
+
     } catch (...) {
         GHOST_LOG("Exception occurred while sending disconnect notification");
         this->webServerConnected = false;
