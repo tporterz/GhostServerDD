@@ -106,6 +106,11 @@ private:
     bool webServerConnected;
     bool enableWebHeightUpdates;
 
+    // Reconnect variables
+    std::chrono::time_point<std::chrono::steady_clock> lastWebReconnectAttempt;
+    int webReconnectAttempts;
+    bool shouldAttemptWebReconnect;
+
 public:
     NetworkManager(const char *logfile = "ghost_log");
     ~NetworkManager();
@@ -143,9 +148,12 @@ public:
     bool ConnectToWebServer(const std::string& ip, unsigned short port);
     void DisconnectFromWebServer();
     void SendHeightJsonDataToWebServer(const std::vector<Client*>& playersWithChanges);
+    void SendPlayerConnectToWebServer(Client& client);
     void SendPlayerDisconnectToWebServer(Client& client, const char* reason);
     void SetWebHeightUpdates(bool enabled);
-
+    void AttemptWebReconnection();
+    bool TestWebServerConnection();
+    void SendServerStatusToWebServer();
 
 #ifdef GHOST_GUI
 signals:

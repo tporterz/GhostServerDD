@@ -35,6 +35,9 @@ static void file_log(std::string str) {
 #define HEARTBEAT_RATE 5000
 #define HEARTBEAT_RATE_UDP 1000 // We don't actually respond to these, they're just to keep the connection alive
 #define CONNECT_TIMEOUT 1500
+#define WEB_RECONNECT_INTERVAL 10000  // Try to reconnect every 10 seconds
+#define CONNECTION_TEST_INTERVAL 30000
+#define MAX_WEB_RECONNECT_ATTEMPTS 0  // 0 = infinite attempts
 
 static std::chrono::time_point<std::chrono::steady_clock> lastHeartbeat;
 static std::chrono::time_point<std::chrono::steady_clock> lastHeartbeatUdp;
@@ -127,8 +130,13 @@ NetworkManager::NetworkManager(const char *logfile)
     , serverPort(53000)
     , serverIP("localhost")
     , lastID(1) //0 == server
+    , webServerConnected(false)
+    , enableWebHeightUpdates(false)
+    , webReconnectAttempts(0)
+    , shouldAttemptWebReconnect(false)
 {
     g_logFile = logfile ? fopen(logfile, "w") : NULL;
+    lastWebReconnectAttempt = std::chrono::steady_clock::now();
 }
 
 NetworkManager::~NetworkManager() {
@@ -330,6 +338,10 @@ void NetworkManager::CheckConnection()
     GHOST_LOG("New player: " + client.name + " (" + (client.spectator ? "spectator" : "player") + ") @ " + client.IP.toString() + ":" + std::to_string(client.port));
 
     this->clients.push_back(std::move(client));
+
+    if (!client.spectator) {
+        this->SendPlayerConnectToWebServer(this->clients.back());
+    }
 }
 
 void NetworkManager::ReceiveUDPUpdates(std::vector<std::pair<unsigned short, sf::Packet>>& buffer)
@@ -381,9 +393,11 @@ void NetworkManager::Treat(sf::Packet& packet, unsigned short udp_port)
         }
         break;
     }
-    case HEADER::STOP_SERVER:
-        this->StopServer();
-        break;
+
+    // case HEADER::STOP_SERVER:
+    //     this->StopServer();
+    //     break;
+
     case HEADER::MAP_CHANGE: {
         for (auto& client : this->clients) {
             if (client.ID != ID) {
@@ -573,6 +587,32 @@ void NetworkManager::RunServer()
             lastHeightUpdate = now;
         }
 
+        // Web server reconnection
+        if (!this->webServerConnected && this->shouldAttemptWebReconnect) {
+            this->AttemptWebReconnection();
+        }
+
+        // Periodically test connection health
+        static std::chrono::time_point<std::chrono::steady_clock> lastConnectionTest = std::chrono::steady_clock::now();
+        if (now > lastConnectionTest + std::chrono::milliseconds(CONNECTION_TEST_INTERVAL)) {
+            if (this->webServerConnected) {
+                // Only test if we actually have clients that might generate data
+                bool hasActiveClients = false;
+                for (auto& client : this->clients) {
+                    if (!client.spectator && IsTowerMap(client.currentMap)) {
+                        hasActiveClients = true;
+                        break;
+                    }
+                }
+                
+                if (hasActiveClients && !this->TestWebServerConnection()) {
+                    GHOST_LOG("Web server connection lost - will attempt to reconnect");
+                    this->shouldAttemptWebReconnect = true;
+                }
+            }
+            lastConnectionTest = now;
+        }
+
         if (now > lastUpdate + std::chrono::milliseconds(50)) {
             // Send bulk update packet
             sf::Packet packet;
@@ -652,19 +692,22 @@ void NetworkManager::DoHeartbeats()
     }
 }
 
-
 bool NetworkManager::ConnectToWebServer(const std::string& ip, unsigned short port) {
     this->webServerIP = sf::IpAddress(ip);
     this->webServerPort = port;
+    this->webReconnectAttempts = 0;
+    this->shouldAttemptWebReconnect = true;
+    this->lastWebReconnectAttempt = std::chrono::steady_clock::now();
     
     if (this->webSocket.connect(this->webServerIP, this->webServerPort, sf::seconds(5)) == sf::Socket::Done) {
         this->webServerConnected = true;
+        this->shouldAttemptWebReconnect = false; // Stop trying since we're connected
         GHOST_LOG("Connected to Deep Dip Web Server: " + ip + ":" + std::to_string(port));
         return true;
     }
     
     this->webServerConnected = false;
-    GHOST_LOG("Failed to connect to Deep Dip Web Server: " + ip + ":" + std::to_string(port));
+    GHOST_LOG("Failed to connect to Deep Dip Web Server: " + ip + ":" + std::to_string(port) + " - will retry automatically");
     return false;
 }
 
@@ -673,6 +716,110 @@ void NetworkManager::DisconnectFromWebServer() {
         this->webSocket.disconnect();
         this->webServerConnected = false;
         GHOST_LOG("Disconnected from Deep Dip Web Server");
+    }
+}
+
+bool NetworkManager::TestWebServerConnection() {
+    if (!this->webServerConnected) {
+        return false;
+    }
+    
+    sf::Socket::Status status = this->webSocket.getLocalPort() != 0 ? sf::Socket::Done : sf::Socket::Disconnected;
+    
+    if (status == sf::Socket::Disconnected) {
+        this->webServerConnected = false;
+        return false;
+    }
+    
+    return true;
+}
+
+void NetworkManager::SendServerStatusToWebServer() {
+    if (!this->webServerConnected || !this->enableWebHeightUpdates) {
+        return;
+    }
+
+    try {
+        std::ostringstream json;
+        json << "{\"type\":\"server_status\""
+             << ",\"timestamp\":" << time(NULL)
+             << ",\"server_port\":" << this->serverPort
+             << ",\"connected_players\":[";
+
+        bool first = true;
+        for (const auto& client : this->clients) {
+            if (!first) json << ",";
+            json << "{"
+                 << "\"id\":" << client.ID
+                 << ",\"name\":\"" << client.name << "\""
+                 << ",\"spectator\":" << (client.spectator ? "true" : "false")
+                 << ",\"map\":\"" << client.currentMap << "\""
+                 << "}";
+            first = false;
+        }
+
+        json << "]}";
+
+        std::string jsonStr = json.str();
+        sf::Uint32 dataSize = static_cast<sf::Uint32>(jsonStr.length());
+
+        if (this->webSocket.send(&dataSize, sizeof(dataSize)) != sf::Socket::Done ||
+            this->webSocket.send(jsonStr.c_str(), dataSize) != sf::Socket::Done) {
+            GHOST_LOG("Failed to send server status to web server - connection lost");
+            this->webServerConnected = false;
+            this->shouldAttemptWebReconnect = true;
+            return;
+        }
+
+        GHOST_LOG("Sent server status to web server: " + std::to_string(this->clients.size()) + " players");
+
+    } catch (...) {
+        GHOST_LOG("Exception occurred while sending server status");
+        this->webServerConnected = false;
+        this->shouldAttemptWebReconnect = true;
+    }
+}
+
+void NetworkManager::AttemptWebReconnection() {
+    auto now = std::chrono::steady_clock::now();
+    
+    // Don't attempt reconnection too frequently
+    if (now < lastWebReconnectAttempt + std::chrono::milliseconds(WEB_RECONNECT_INTERVAL)) {
+        return;
+    }
+    
+    // Check if we've hit max attempts (if limit is set)
+    if (MAX_WEB_RECONNECT_ATTEMPTS > 0 && webReconnectAttempts >= MAX_WEB_RECONNECT_ATTEMPTS) {
+        GHOST_LOG("Max web server reconnection attempts reached. Giving up.");
+        shouldAttemptWebReconnect = false;
+        return;
+    }
+    
+    lastWebReconnectAttempt = now;
+    webReconnectAttempts++;
+    
+    GHOST_LOG("Attempting web server reconnection (attempt " + std::to_string(webReconnectAttempts) + ")...");
+    
+    // Properly disconnect and cleanup the socket
+    if (this->webSocket.getLocalPort() != 0) {
+        this->webSocket.disconnect();
+    }
+    this->webServerConnected = false;
+    
+    // Small delay to ensure socket cleanup
+    sf::sleep(sf::milliseconds(100));
+    
+    // Attempt to reconnect
+    if (this->webSocket.connect(this->webServerIP, this->webServerPort, sf::seconds(5)) == sf::Socket::Done) {
+        this->webServerConnected = true;
+        this->webReconnectAttempts = 0; // reset on success
+        this->shouldAttemptWebReconnect = false;
+        GHOST_LOG("Successfully reconnected to Deep Dip Web Server!");
+
+        this->SendServerStatusToWebServer();
+    } else {
+        this->webServerConnected = false;
+        GHOST_LOG("Failed to reconnect to Deep Dip Web Server (attempt " + std::to_string(webReconnectAttempts) + ")");
     }
 }
 
@@ -713,11 +860,11 @@ void NetworkManager::SendHeightJsonDataToWebServer(const std::vector<Client*>& p
         std::string jsonStr = json.str();
         sf::Uint32 dataSize = static_cast<sf::Uint32>(jsonStr.length());
         
-        // Send size first, then data (so receiver knows how much to read)
         if (this->webSocket.send(&dataSize, sizeof(dataSize)) != sf::Socket::Done ||
             this->webSocket.send(jsonStr.c_str(), dataSize) != sf::Socket::Done) {
-            GHOST_LOG("Failed to send height data to Deep Dip Web Server");
+            GHOST_LOG("Failed to send height data to Deep Dip Web Server - connection lost");
             this->webServerConnected = false;
+            this->shouldAttemptWebReconnect = true;
             return;
         }
         
@@ -725,6 +872,49 @@ void NetworkManager::SendHeightJsonDataToWebServer(const std::vector<Client*>& p
         
     } catch (...) {
         GHOST_LOG("Exception occurred while sending to Deep Dip Web Server");
+        this->webServerConnected = false;
+    }
+}
+
+void NetworkManager::SendPlayerConnectToWebServer(Client& client) {
+    if (!this->webServerConnected || !this->enableWebHeightUpdates) {
+        return;
+    }
+
+    try {
+        std::ostringstream json;
+        json << "{\"type\":\"player_connect\""
+             << ",\"timestamp\":" << time(NULL)
+             << ",\"server_port\":" << this->serverPort
+             << ",\"player\":{"
+             << "\"id\":" << client.ID
+             << ",\"name\":\"" << client.name << "\""
+             << ",\"ip\":\"" << client.IP.toString() << "\""
+             << ",\"port\":" << client.port
+             << ",\"model\":\"" << client.modelName << "\""
+             << ",\"map\":\"" << client.currentMap << "\""
+             << ",\"tcp_only\":" << (client.TCP_only ? "true" : "false")
+             << ",\"spectator\":" << (client.spectator ? "true" : "false")
+             << ",\"color\":{\"r\":" << (int)client.color.r 
+             << ",\"g\":" << (int)client.color.g 
+             << ",\"b\":" << (int)client.color.b << "}"
+             << "}}";
+
+        std::string jsonStr = json.str();
+        sf::Uint32 dataSize = static_cast<sf::Uint32>(jsonStr.length());
+
+        if (this->webSocket.send(&dataSize, sizeof(dataSize)) != sf::Socket::Done ||
+            this->webSocket.send(jsonStr.c_str(), dataSize) != sf::Socket::Done) {
+            GHOST_LOG("Failed to send connect notification to web server - connection lost");
+            this->webServerConnected = false;
+            this->shouldAttemptWebReconnect = true;
+            return;
+        }
+
+        GHOST_LOG("Sent connect notification for " + client.name + " to web server");
+
+    } catch (...) {
+        GHOST_LOG("Exception occurred while sending connect notification");
         this->webServerConnected = false;
     }
 }
@@ -758,11 +948,12 @@ void NetworkManager::SendPlayerDisconnectToWebServer(Client& client, const char*
         std::string jsonStr = json.str();
         sf::Uint32 dataSize = static_cast<sf::Uint32>(jsonStr.length());
         GHOST_LOG("Sending JSON size: " + std::to_string(dataSize));
-
+        
         if (this->webSocket.send(&dataSize, sizeof(dataSize)) != sf::Socket::Done ||
             this->webSocket.send(jsonStr.c_str(), dataSize) != sf::Socket::Done) {
-            GHOST_LOG("Failed to send disconnect notification to external server");
+            GHOST_LOG("Failed to send disconnect notification to web server - connection lost");
             this->webServerConnected = false;
+            this->shouldAttemptWebReconnect = true;
             return;
         }
 

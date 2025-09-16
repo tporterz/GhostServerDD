@@ -293,9 +293,16 @@ int main(int argc, char **argv) {
     g_network = &network;
 
     puts("Server starting up");
-    network.StartServer(port);
-    network.ConnectToWebServer("127.0.0.1", 8080);
+    if (!network.StartServer(port)) {
+        printf("Failed to start server on port %d\n", port);
+        return 1;
+    }
+    puts("Attempting to connect to web server...");
+    if (!network.ConnectToWebServer("127.0.0.1", 8080)) {
+        puts("Web server connection failed - will retry automatically in background");
+    }
     network.SetWebHeightUpdates(true);
+
     while (!g_should_stop) {
     #ifdef _WIN32
         if (_kbhit()) {
