@@ -761,6 +761,10 @@ void NetworkManager::SendServerStatusToWebServer() {
         json << "]}";
 
         std::string jsonStr = json.str();
+        if (first) {
+            // No players met the criteria, don't send empty update
+            return;
+        }
         sf::Uint32 dataSize = static_cast<sf::Uint32>(jsonStr.length());
 
         if (this->webSocket.send(&dataSize, sizeof(dataSize)) != sf::Socket::Done ||
@@ -805,7 +809,7 @@ void NetworkManager::AttemptWebReconnection() {
         this->webSocket.disconnect();
     }
     this->webServerConnected = false;
-    
+
     // Small delay to ensure socket cleanup
     sf::sleep(sf::milliseconds(100));
     
@@ -837,27 +841,35 @@ void NetworkManager::SendHeightJsonDataToWebServer(const std::vector<Client*>& p
         json << "{\"timestamp\":" << time(NULL) 
              << ",\"server_port\":" << this->serverPort
              << ",\"players\":[";
+
+        bool first = true;
         
-        for (size_t i = 0; i < playersWithChanges.size(); ++i) {
-            const auto* client = playersWithChanges[i];
+        for (const auto* client : playersWithChanges) {
             float currentHeight = IsAtOrigin(client->data.position) ? 0.0f : WorldZToTowerHeight(client->data.position.z); 
             float heightDelta = currentHeight - client->lastHeightUpdate;
             if (heightDelta <= 2000 && heightDelta != 0) {
+                if (!first) json << ",";
+
                 json << "{\"id\":" << client->ID 
-                 << ",\"name\":\"" << client->name << "\""
-                 << ",\"max_height\":" << client->maxHeight
-                 << ",\"current_height\":" << currentHeight
-                 << ",\"max_percentage\":" << (client->maxHeight / TOWER_TOTAL_HEIGHT * 100.0f)
-                 << ",\"current_percentage\":" << (currentHeight / TOWER_TOTAL_HEIGHT * 100.0f)
-                 << ",\"map\":\"" << client->currentMap << "\"}";
+                     << ",\"name\":\"" << client->name << "\""
+                     << ",\"max_height\":" << client->maxHeight
+                     << ",\"current_height\":" << currentHeight
+                     << ",\"max_percentage\":" << (client->maxHeight / TOWER_TOTAL_HEIGHT * 100.0f)
+                     << ",\"current_percentage\":" << (currentHeight / TOWER_TOTAL_HEIGHT * 100.0f)
+                     << ",\"map\":\"" << client->currentMap << "\"}";
             
-                if (i < playersWithChanges.size() - 1) json << ",";
+                first = false;
             }
         }
         json << "]}";
         
         // Send JSON as string with length prefix
         std::string jsonStr = json.str();
+        if (first) {
+            // No players met the criteria, don't send empty update
+            return;
+        }
+
         sf::Uint32 dataSize = static_cast<sf::Uint32>(jsonStr.length());
         
         if (this->webSocket.send(&dataSize, sizeof(dataSize)) != sf::Socket::Done ||
