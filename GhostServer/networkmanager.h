@@ -149,7 +149,9 @@ public:
     void DisconnectFromWebServer();
     void SendHeightJsonDataToWebServer(const std::vector<Client*>& playersWithChanges);
     void SendPlayerConnectToWebServer(Client& client);
-    void SendPlayerDisconnectToWebServer(Client& client, const char* reason);
+    void SendPlayerDisconnectToWebServer(sf::Uint32 clientID, const std::string& clientName, 
+                                   float maxHeight, const Vector& position, 
+                                   const std::string& currentMap, const char* reason);
     void SetWebHeightUpdates(bool enabled);
     void AttemptWebReconnection();
     bool TestWebServerConnection();

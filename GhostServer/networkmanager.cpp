@@ -211,6 +211,15 @@ void NetworkManager::DisconnectPlayer(Client& c, const char *reason)
 {
     sf::Packet packet;
     packet << HEADER::DISCONNECT << c.ID;
+    
+    // Capture client data BEFORE any modifications
+    bool shouldNotifyWebServer = !c.spectator && IsTowerMap(c.currentMap);
+    sf::Uint32 clientID = c.ID;
+    std::string clientName = c.name;
+    float clientMaxHeight = c.maxHeight;
+    Vector clientPosition = c.data.position;
+    std::string clientMap = c.currentMap;
+    
     int id = 0;
     int toErase = -1;
     for (; id < this->clients.size(); ++id) {
@@ -226,6 +235,12 @@ void NetworkManager::DisconnectPlayer(Client& c, const char *reason)
 
     if (toErase != -1) {
         this->clients.erase(this->clients.begin() + toErase);
+    }
+    
+    // Send web server notification using the captured data
+    if (shouldNotifyWebServer) {
+        this->SendPlayerDisconnectToWebServer(clientID, clientName, clientMaxHeight, 
+                                            clientPosition, clientMap, reason);
     }
 }
 
@@ -385,11 +400,6 @@ void NetworkManager::Treat(sf::Packet& packet, unsigned short udp_port)
         auto client = this->GetClientByID(ID);
         if (client) {
             this->DisconnectPlayer(*client, "requested");
-
-            if (!client->spectator && IsTowerMap(client->currentMap)) {
-                std::string mapName = client->currentMap;
-                this->SendPlayerDisconnectToWebServer(*client, "requested");
-            }
         }
         break;
     }
@@ -931,7 +941,9 @@ void NetworkManager::SendPlayerConnectToWebServer(Client& client) {
     }
 }
 
-void NetworkManager::SendPlayerDisconnectToWebServer(Client& client, const char* reason) {
+void NetworkManager::SendPlayerDisconnectToWebServer(sf::Uint32 clientID, const std::string& clientName, 
+                                                   float maxHeight, const Vector& position, 
+                                                   const std::string& currentMap, const char* reason) {
     if (!this->webServerConnected || !this->enableWebHeightUpdates) {
         return;
     }
@@ -942,14 +954,13 @@ void NetworkManager::SendPlayerDisconnectToWebServer(Client& client, const char*
              << ",\"timestamp\":" << time(NULL)
              << ",\"server_port\":" << this->serverPort
              << ",\"player\":{"
-             << "\"id\":" << client.ID
-             << ",\"name\":\"" << client.name << "\""
+             << "\"id\":" << clientID
+             << ",\"name\":\"" << clientName << "\""
              << ",\"reason\":\"" << reason << "\""
-             << ",\"final_max_height\":" << client.maxHeight;
+             << ",\"final_max_height\":" << maxHeight;
 
-
-        float currentHeight = IsAtOrigin(client.data.position) ? 0.0f : WorldZToTowerHeight(client.data.position.z);
-        float maxPercentage = (client.maxHeight / TOWER_TOTAL_HEIGHT) * 100.0f;
+        float currentHeight = IsAtOrigin(position) ? 0.0f : WorldZToTowerHeight(position.z);
+        float maxPercentage = (maxHeight / TOWER_TOTAL_HEIGHT) * 100.0f;
         float currentPercentage = (currentHeight / TOWER_TOTAL_HEIGHT) * 100.0f;
         json << ",\"current_height\":" << currentHeight
              << ",\"max_percentage\":" << maxPercentage
@@ -959,7 +970,6 @@ void NetworkManager::SendPlayerDisconnectToWebServer(Client& client, const char*
 
         std::string jsonStr = json.str();
         sf::Uint32 dataSize = static_cast<sf::Uint32>(jsonStr.length());
-        GHOST_LOG("Sending JSON size: " + std::to_string(dataSize));
         
         if (this->webSocket.send(&dataSize, sizeof(dataSize)) != sf::Socket::Done ||
             this->webSocket.send(jsonStr.c_str(), dataSize) != sf::Socket::Done) {
@@ -969,7 +979,7 @@ void NetworkManager::SendPlayerDisconnectToWebServer(Client& client, const char*
             return;
         }
 
-        GHOST_LOG("Sent disconnect notification for " + client.name + " to web server");
+        GHOST_LOG("Sent disconnect notification for " + clientName + " to web server");
 
     } catch (...) {
         GHOST_LOG("Exception occurred while sending disconnect notification");
