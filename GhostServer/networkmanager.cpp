@@ -45,7 +45,7 @@ static std::chrono::time_point<std::chrono::steady_clock> lastUpdate;
 
 // Deep Dip Vars
 static std::chrono::time_point<std::chrono::steady_clock> lastHeightUpdate;
-#define HEIGHT_UPDATE_RATE 5000 // update every 30 seconds
+#define HEIGHT_UPDATE_RATE 30000 // update every 30 seconds
 #define TOWER_BOTTOM_Z -13103.97f
 #define TOWER_TOP_Z 9632.03f
 #define TOWER_TOTAL_HEIGHT (TOWER_TOP_Z - TOWER_BOTTOM_Z)
