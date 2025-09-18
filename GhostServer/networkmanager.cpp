@@ -213,7 +213,7 @@ void NetworkManager::DisconnectPlayer(Client& c, const char *reason)
     packet << HEADER::DISCONNECT << c.ID;
     
     // Capture client data BEFORE any modifications
-    bool shouldNotifyWebServer = !c.spectator && IsTowerMap(c.currentMap);
+    bool shouldNotifyWebServer = !c.spectator;
     sf::Uint32 clientID = c.ID;
     std::string clientName = c.name;
     float clientMaxHeight = c.maxHeight;
