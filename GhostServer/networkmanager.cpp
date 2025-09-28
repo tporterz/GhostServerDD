@@ -49,7 +49,7 @@ static std::chrono::time_point<std::chrono::steady_clock> lastHeightUpdate;
 #define TOWER_BOTTOM_Z -13103.97f
 #define TOWER_TOP_Z 9632.03f
 #define TOWER_TOTAL_HEIGHT (TOWER_TOP_Z - TOWER_BOTTOM_Z)
-#define TOWER_MAP_NAME "bhop_deep_dip_c_bp1" // replace with real bsp name later
+#define TOWER_MAP_NAME "bhop_deep_dip_c_bp2_fix" // replace with real bsp name later
 
 // Helper function to convert world Z to tower height
 static float WorldZToTowerHeight(float worldZ) {
