@@ -123,7 +123,9 @@ public:
 
     void ScheduleServerThread(std::function<void()> func);
 
+    std::vector<Client *> GetPlayerByName(std::string name);
     Client* GetClientByID(sf::Uint32 ID);
+    std::vector<Client *> GetClientByIP(sf::IpAddress ip);
 
     bool StartServer(const int port);
     void StopServer();
@@ -131,12 +133,11 @@ public:
 
     bool ShouldBlockConnection(const sf::IpAddress &ip);
     void DisconnectPlayer(Client &client, const char *reason);
-    std::vector<Client *> GetPlayerByName(std::string name);
     void StartCountdown(const std::string preCommands, const std::string postCommands, const int duration);
 
     void CheckConnection();
-    void ReceiveUDPUpdates(std::vector<std::pair<unsigned short, sf::Packet>>& buffer);
-    void Treat(sf::Packet& packet, unsigned short udp_port);
+    void ReceiveUDPUpdates(std::vector<std::tuple<sf::Packet, sf::IpAddress, unsigned short>>& buffer);
+    void Treat(sf::Packet& packet, sf::IpAddress ip, unsigned short udp_port);
 
     void BanClientIP(Client &cl);
     void ServerMessage(const char *msg);

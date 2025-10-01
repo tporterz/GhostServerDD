@@ -152,6 +152,18 @@ void NetworkManager::ScheduleServerThread(std::function<void()> func) {
     g_server_queue_mutex.unlock();
 }
 
+std::vector<Client *> NetworkManager::GetPlayerByName(std::string name)
+{
+    std::vector<Client *> matches;
+    for (auto &client : this->clients) {
+        if (client.name == name) {
+            matches.push_back(&client);
+        }
+    }
+
+    return matches;
+}
+
 Client* NetworkManager::GetClientByID(sf::Uint32 ID)
 {
     for (auto& client : this->clients) {
@@ -161,6 +173,16 @@ Client* NetworkManager::GetClientByID(sf::Uint32 ID)
     }
 
     return nullptr;
+}
+
+std::vector<Client *> NetworkManager::GetClientByIP(sf::IpAddress ip) {
+    std::vector<Client *> clients;
+    for (auto& client : this->clients) {
+        if (client.IP == ip) {
+            clients.push_back(&client);
+        }
+    }
+    return clients;
 }
 
 bool NetworkManager::StartServer(const int port)
@@ -244,18 +266,6 @@ void NetworkManager::DisconnectPlayer(Client& c, const char *reason)
     }
 }
 
-std::vector<Client *> NetworkManager::GetPlayerByName(std::string name)
-{
-    std::vector<Client *> matches;
-    for (auto &client : this->clients) {
-        if (client.name == name) {
-            matches.push_back(&client);
-        }
-    }
-
-    return matches;
-}
-
 void NetworkManager::StartCountdown(const std::string preCommands, const std::string postCommands, const int duration)
 {
     sf::Packet packet;
@@ -330,6 +340,7 @@ void NetworkManager::CheckConnection()
     client.returnedHeartbeat = true; // Make sure they don't get immediately disconnected; their heartbeat starts on next beat
     client.missedLastHeartbeat = false;
     client.spectator = spectator; //People can break the run when joining in the middle of a run
+    client.maxHeight = 0;
 
     this->selector.add(*client.tcpSocket);
 
@@ -359,7 +370,7 @@ void NetworkManager::CheckConnection()
     }
 }
 
-void NetworkManager::ReceiveUDPUpdates(std::vector<std::pair<unsigned short, sf::Packet>>& buffer)
+void NetworkManager::ReceiveUDPUpdates(std::vector<std::tuple<sf::Packet, sf::IpAddress, unsigned short>>& buffer)
 {
     sf::Socket::Status status;
     do {
@@ -368,16 +379,34 @@ void NetworkManager::ReceiveUDPUpdates(std::vector<std::pair<unsigned short, sf:
         unsigned short int port;
         status = this->udpSocket.receive(packet, ip, port);
         if (status == sf::Socket::Done) {
-            buffer.push_back({ port, packet });
+            buffer.push_back({ packet, ip, port });
         }
     } while (status == sf::Socket::Done);
 }
 
-void NetworkManager::Treat(sf::Packet& packet, unsigned short udp_port)
+#define SEND_TO_OTHERS(packet) \
+    for (auto& other : this->clients) { \
+        if (other.ID != ID) { \
+            other.tcpSocket->send(packet); \
+        } \
+    }
+
+#define BROADCAST(packet) \
+    for (auto& other : this->clients) { \
+        other.tcpSocket->send(packet); \
+    }
+
+void NetworkManager::Treat(sf::Packet& packet, sf::IpAddress ip, unsigned short udp_port)
 {
     HEADER header;
     sf::Uint32 ID;
     packet >> header >> ID;
+
+    // Prevent impersonation
+    auto client = this->GetClientByID(ID);
+    if (!client || client->IP != ip) {
+        return;
+    }
 
     if (udp_port != 0) {
         auto client = this->GetClientByID(ID);
@@ -390,127 +419,81 @@ void NetworkManager::Treat(sf::Packet& packet, unsigned short udp_port)
     case HEADER::PING: {
         sf::Packet ping_packet;
         ping_packet << HEADER::PING;
-        auto client = this->GetClientByID(ID);
-        if (client) {
-            client->tcpSocket->send(ping_packet);
-        }
-    }
+        client->tcpSocket->send(ping_packet);
         break;
+    }
     case HEADER::DISCONNECT: {
-        auto client = this->GetClientByID(ID);
-        if (client) {
-            this->DisconnectPlayer(*client, "requested");
-        }
+        this->DisconnectPlayer(*client, "requested");
         break;
     }
 
+    // Questionable packet, not being used for Deep Dip
     // case HEADER::STOP_SERVER:
     //     this->StopServer();
     //     break;
 
     case HEADER::MAP_CHANGE: {
-        for (auto& client : this->clients) {
-            if (client.ID != ID) {
-                client.tcpSocket->send(packet);
-            }
-        }
-        auto client = this->GetClientByID(ID);
-        if (client) {
-            std::string map;
-            packet >> map;
-            client->currentMap = map;
-            GHOST_LOG(client->name + " is now on " + map);
-        }
-
+        std::string map;
+        packet >> map;
+        client->currentMap = map;
+        GHOST_LOG(client->name + " is now on " + map);
+        SEND_TO_OTHERS(packet);
         break;
     }
     case HEADER::HEART_BEAT: {
-        auto client = this->GetClientByID(ID);
-        if (client) {
-            uint32_t token;
-            packet >> token;
-            if (token == client->heartbeatToken) {
-                // Good heartbeat!
-                client->returnedHeartbeat = true;
-            }
-            break;
+        uint32_t token;
+        packet >> token;
+        if (token == client->heartbeatToken) {
+            // Good heartbeat!
+            client->returnedHeartbeat = true;
         }
+        break;
     }
     case HEADER::MESSAGE: {
-        auto client = this->GetClientByID(ID);
-        if (client) {
-            std::string message;
-            packet >> message;
-            GHOST_LOG("[message] " + client->name + ": " + message);
-            for (auto& other : this->clients) {
-                other.tcpSocket->send(packet);
-            }
-        }
+        std::string message;
+        packet >> message;
+        GHOST_LOG("[message] " + client->name + ": " + message);
+        SEND_TO_OTHERS(packet);
         break;
     }
     case HEADER::COUNTDOWN: {
         sf::Packet packet_confirm;
         packet_confirm << HEADER::COUNTDOWN << sf::Uint32(0) << sf::Uint8(1);
-        auto client = this->GetClientByID(ID);
-        if (client) {
-            client->tcpSocket->send(packet_confirm);
-        }
+        client->tcpSocket->send(packet_confirm);
         break;
     }
     case HEADER::SPEEDRUN_FINISH: {
-        for (auto& client : this->clients) {
-            client.tcpSocket->send(packet);
-        }
+        SEND_TO_OTHERS(packet);
         break;
     }
     case HEADER::MODEL_CHANGE: {
         std::string modelName;
         packet >> modelName;
-        auto client = this->GetClientByID(ID);
-        if (client) {
-            client->modelName = modelName;
-            for (auto& other : this->clients) {
-                other.tcpSocket->send(packet);
-            }
-        }
+        client->modelName = modelName;
+        SEND_TO_OTHERS(packet);
         break;
     }
     case HEADER::COLOR_CHANGE: {
         Color col;
         packet >> col;
-        auto client = this->GetClientByID(ID);
-        if (client) {
-            client->color = col;
-            for (auto& other : this->clients) {
-                other.tcpSocket->send(packet);
-            }
-        }
+        client->color = col;
+        SEND_TO_OTHERS(packet);
         break;
     }
     case HEADER::UPDATE: {
         DataGhost data;
         packet >> data;
-        auto client = this->GetClientByID(ID);
-        if (client) {
-            client->data = data;
-
-            // Only track height for non-spectators on tower map, and not when they're at the origin
-            if (!client->spectator && IsTowerMap(client->currentMap) && !IsAtOrigin(data.position)) {
-                float towerHeight = WorldZToTowerHeight(data.position.z);
-                float heightDelta = towerHeight - client->lastHeight;
-                if (towerHeight > client->maxHeight && heightDelta <= 300.0f && heightDelta != 0.0f) {
-                    client->maxHeight = towerHeight;
-                }
-                client->lastHeight = towerHeight;
+        client->data = data;
+        // Only track height for non-spectators on tower map, and not when they're at the origin
+        if (!client->spectator && IsTowerMap(client->currentMap) && !IsAtOrigin(data.position)) {
+            float towerHeight = WorldZToTowerHeight(data.position.z);
+            float heightDelta = towerHeight - client->lastHeight;
+            if (towerHeight > client->maxHeight && heightDelta <= 300.0f && heightDelta != 0.0f) {
+                client->maxHeight = towerHeight;
             }
+            client->lastHeight = towerHeight;
         }
         break;
-    }
-
-    case HEADER::HEIGHT_UPDATE: {
-        break;
-        // For receiving height updates from clients if needed
-        // Will just track server-side for now
     }
     default:
         break;
@@ -641,10 +624,10 @@ void NetworkManager::RunServer()
         }
 
         //UDP
-        std::vector<std::pair<unsigned short, sf::Packet>> buffer;
+        std::vector<std::tuple<sf::Packet, sf::IpAddress, unsigned short>> buffer;
         this->ReceiveUDPUpdates(buffer);
-        for (auto [port, packet] : buffer) {
-            this->Treat(packet, port);
+        for (auto [packet, ip, port] : buffer) {
+            this->Treat(packet, ip, port);
         }
 
         if (this->selector.wait(sf::milliseconds(50))) { // If a packet is received
@@ -660,7 +643,7 @@ void NetworkManager::RunServer()
                             --i;
                             continue;
                         }
-                        this->Treat(packet, 0);
+                        this->Treat(packet, this->clients[i].IP, 0);
                     }
                 }
             }
